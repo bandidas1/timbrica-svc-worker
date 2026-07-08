@@ -58,3 +58,22 @@ GitHub Actions builds on every push to `main` and publishes to
 that image. No local Docker needed. Checkpoints are baked into the image for
 reliable cold starts.
 
+
+## Operations — hard-won endpoint settings
+
+Verified live on 2026-07-08. Getting these wrong costs hours of misdiagnosis.
+
+| Setting | Value | Why |
+|---|---|---|
+| `workersMin` | `0` | Anything higher bills continuously against the **shared** RunPod balance that the live `voice-clone` endpoint also draws from. |
+| `idleTimeout` | **≥ 30 s** | At `15 s` RunPod reaped the `ready` worker before the scheduler handed it the queued job: `workers.idle=1, jobs.inQueue=1` forever, and the caller only ever saw a poll timeout. Two production runs failed this way before the timeout was raised. |
+| `gpuTypeIds` | only types with real capacity | `A40 / A4000 / A4500` reported `od=None` (no capacity) and produced `workers.throttled=1`. Check `gpuTypes.lowestPrice.uninterruptablePrice != null` before listing a type. |
+| image ref | pinned by **digest** | A moving tag must never change what a paid conversion produces. |
+
+**Cold start** is ~50–100 s (the image is ~8–9 GB). The conversion itself is ~3–5 s
+for a 28 s vocal on a 3090 (≈5× realtime), so a warm worker answers in seconds. The
+Laravel side polls for up to `poll_max_s = 480 s`, which comfortably covers a cold
+pull; a job that outlives it refunds the user in full.
+
+`workersStandby` mirrors `workersMax` and is **not** settable via REST or GraphQL —
+it is derived, not an always-on worker count. Throttled workers do not bill.
