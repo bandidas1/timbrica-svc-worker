@@ -1,0 +1,53 @@
+name: build-and-push
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "handler_seedvc.py"
+      - "bake_seedvc.py"
+      - "Dockerfile.seedvc"
+      - "requirements-seedvc.txt"
+      - ".github/workflows/build.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  seedvc:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image (torch+cuda+seed-vc checkpoints) is several GB — free the runner disk.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (seed-vc)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.seedvc
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:seedvc
+          provenance: false

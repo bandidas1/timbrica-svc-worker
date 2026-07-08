@@ -1,0 +1,27 @@
+# seed-vc runtime deps. torch/torchvision/torchaudio are installed separately in
+# the Dockerfile from the CUDA 12.4 wheel index.
+#
+# This is the EMPIRICALLY VERIFIED minimal set: seed-vc's SVC inference was run
+# end-to-end on a rented RTX 3090 with exactly these packages (2026-07-08 spike).
+# Upstream's requirements.txt additionally pins gradio / FreeSimpleGUI /
+# sounddevice / funasr / modelscope / jiwer — all web-UI, realtime-mic or eval-only
+# extras that the serverless handler never imports (gradio is stubbed out).
+accelerate
+scipy==1.13.1
+librosa==0.10.2
+huggingface-hub>=0.28.1
+munch==4.0.0
+einops==0.8.0
+descript-audio-codec==1.0.0
+pydub==0.25.1
+resemblyzer
+transformers==4.46.3
+soundfile==0.12.1
+numpy==1.26.4
+hydra-core==1.3.2
+pyyaml
+python-dotenv
+
+# provenance watermark + serverless runtime
+resemble-perth
+runpod>=1.7.0

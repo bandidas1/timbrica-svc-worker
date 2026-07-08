@@ -1,0 +1,43 @@
+# seed-vc singing-voice-conversion serverless worker for RunPod.
+# Base: python:3.11-slim — torch's cu124 wheels bundle the CUDA runtime libs, so we
+# only need the host NVIDIA driver (RunPod provides it). Mirrors the shape of
+# timbrica-qwen-tts-worker.
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/hf \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    SEED_VC_DIR=/seed-vc
+
+# System libs: libsndfile for soundfile, ffmpeg for librosa/pydub decode,
+# libgomp for numpy/scipy OpenMP, git to fetch seed-vc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsndfile1 ffmpeg libgomp1 ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Torch first, from the CUDA 12.4 wheel index (seed-vc pins the 2.4.x line).
+RUN pip install --no-cache-dir \
+        torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+        --index-url https://download.pytorch.org/whl/cu124
+
+# seed-vc itself (GPLv3 — executed only on our own GPU, never distributed).
+# Pinned to a commit so a silent upstream change can never alter a paid result.
+ARG SEED_VC_REF=51383efd921027683c89e5348211d93ff12ac2a8
+RUN git clone https://github.com/Plachtaa/seed-vc.git /seed-vc \
+    && cd /seed-vc && git checkout "$SEED_VC_REF" && rm -rf .git
+
+COPY requirements-seedvc.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Bake every checkpoint into the image → reliable, fast cold starts.
+# Non-fatal: if the CPU builder can't load them, they download on first boot.
+COPY bake_seedvc.py /tmp/bake_seedvc.py
+RUN python /tmp/bake_seedvc.py || echo "weight bake skipped (will download on first boot)"
+
+# Pre-init the Perth watermarker so its weights are baked too.
+RUN python -c "import perth; perth.PerthImplicitWatermarker(); print('perth baked')" || echo "perth build-init skipped"
+
+COPY handler_seedvc.py /handler.py
+CMD ["python", "-u", "/handler.py"]

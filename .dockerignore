@@ -1,0 +1,7 @@
+.git
+.github
+*.md
+*.wav
+*.mp3
+test_input.json
+__pycache__
