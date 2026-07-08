@@ -46,6 +46,22 @@ _LOAD_ERR = None
 app_svc = None
 
 
+class _DiscardedSegment:
+    """Stand-in for pydub.AudioSegment inside app_svc.voice_conversion().
+
+    That function is written for a streaming Gradio UI and mp3-encodes each chunk
+    before yielding it; the handler keeps only the final waveform, so the encode is
+    pure waste (and drags in ffmpeg at request time). `.export(...).read()` must
+    still return bytes, hence the empty buffer.
+    """
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def export(self, *args, **kwargs):
+        return io.BytesIO(b"")
+
+
 def _load():
     global _READY, _LOAD_ERR, app_svc
     from types import SimpleNamespace
@@ -59,6 +75,13 @@ def _load():
     # `.to(device)` dies with "'NoneType' object has no attribute 'type'".
     # Caught on a real GPU before ever building the image.
     _m.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # voice_conversion() is written for a streaming web UI: it mp3-encodes EVERY
+    # chunk through pydub (→ an ffmpeg subprocess) and yields it. We discard those
+    # chunks — only the final float waveform matters. Stub the encoder out: drops an
+    # ffmpeg round-trip per chunk (real time on a 4-minute song) and removes a
+    # runtime dependency. Found by running the handler on a real GPU.
+    _m.AudioSegment = _DiscardedSegment
 
     args = SimpleNamespace(checkpoint=None, config=None, share=False, fp16=True, gpu=0)
     (
