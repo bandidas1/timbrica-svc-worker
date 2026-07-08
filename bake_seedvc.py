@@ -12,7 +12,13 @@ sys.modules.setdefault("gradio", types.ModuleType("gradio"))
 
 from types import SimpleNamespace  # noqa: E402
 
+import torch  # noqa: E402
+
 import app_svc  # noqa: E402
+
+# app_svc only assigns its module-level `device` inside `if __name__ == "__main__"`,
+# so an import leaves it None (see handler_seedvc._load). The builder is CPU-only.
+app_svc.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 app_svc.load_models(SimpleNamespace(checkpoint=None, config=None, share=False, fp16=False, gpu=0))
 print("seed-vc weights baked", flush=True)

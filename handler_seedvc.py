@@ -49,7 +49,16 @@ app_svc = None
 def _load():
     global _READY, _LOAD_ERR, app_svc
     from types import SimpleNamespace
+
+    import torch
     import app_svc as _m
+
+    # UPSTREAM TRAP: app_svc declares `device = None` at module scope and only
+    # assigns it inside `if __name__ == "__main__"`. Importing the module (which we
+    # must, to reuse load_models + voice_conversion) leaves it None, and the first
+    # `.to(device)` dies with "'NoneType' object has no attribute 'type'".
+    # Caught on a real GPU before ever building the image.
+    _m.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     args = SimpleNamespace(checkpoint=None, config=None, share=False, fp16=True, gpu=0)
     (
