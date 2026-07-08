@@ -74,7 +74,17 @@ def handler(event):
     if not src_b64 or not isinstance(src_b64, str): return {"error": "source_b64_required"}
     if not tgt_b64 or not isinstance(tgt_b64, str): return {"error": "target_b64_required"}
     n_steps = max(10, min(100, int(inp.get("diffusion_steps") or 32)))
-    shift = max(-12, min(12, int(inp.get("semi_tone_shift") or 0)))
+    # "0 semitones" MUST mean "do not touch the key" — the caller mixes our vocal back
+    # under THEIR instrumental, so a silent transposition returns an out-of-tune mix.
+    # SoulX's auto_shift retunes the performance into the REFERENCE clip's register; the
+    # reference is a short spoken liveness phrase, whose pitch has nothing to do with the
+    # song. seed-vc passes auto_f0_adjust=False for exactly this reason — match it.
+    # Auto-matching stays available, but only when explicitly asked for.
+    raw_shift = inp.get("semi_tone_shift") or 0
+    if isinstance(raw_shift, str) and raw_shift.strip().lower() == "auto":
+        auto_shift, shift = True, 0
+    else:
+        auto_shift, shift = False, max(-12, min(12, int(raw_shift)))
 
     src = tgt = None
     try:
@@ -89,8 +99,7 @@ def handler(event):
         with torch.no_grad():
             audio, _shift = _model.infer(
                 pt_wav=pt_wav, gt_wav=gt_wav, pt_f0=pt_f0, gt_f0=gt_f0,
-                # No explicit shift asked for -> let it match the target key itself.
-                auto_shift=(shift == 0), pitch_shift=shift,
+                auto_shift=auto_shift, pitch_shift=shift,
                 n_steps=n_steps, cfg=_config.infer.cfg, use_fp16=(_device == "cuda"),
             )
         audio = audio.squeeze().float().cpu().numpy()
@@ -107,7 +116,7 @@ def handler(event):
         buf = io.BytesIO(); sf.write(buf, audio, int(sr), format="WAV", subtype="PCM_16")
         return {"audio_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
                 "sample_rate": int(sr), "gen_seconds": gen_s,
-                "engine": "soulx", "watermarked": watermarked}
+                "engine": "soulx", "auto_shift": auto_shift, "pitch_shift": shift, "watermarked": watermarked}
     except Exception as e:
         traceback.print_exc()
         return {"error": "convert_failed", "detail": repr(e)[:300]}
