@@ -63,10 +63,10 @@ paid result. See `docs/voice-cover-legal.md` in the main repo.
 
 ## Build
 
-GitHub Actions builds on every push to `main` and publishes to
-`ghcr.io/<owner>/timbrica-svc-worker:seedvc`. The RunPod serverless endpoint pulls
-that image. No local Docker needed. Checkpoints are baked into the image for
-reliable cold starts.
+GitHub Actions builds a matrix — one image per engine — and publishes
+`ghcr.io/<owner>/timbrica-svc-worker:{seedvc,soulx}`. Each RunPod serverless endpoint
+pulls its own tag. No local Docker needed. Checkpoints are baked into the images, so
+a cold worker never downloads weights at request time.
 
 
 ## Operations — hard-won endpoint settings
@@ -80,10 +80,21 @@ Verified live on 2026-07-08. Getting these wrong costs hours of misdiagnosis.
 | `gpuTypeIds` | only types with real capacity | `A40 / A4000 / A4500` reported `od=None` (no capacity) and produced `workers.throttled=1`. Check `gpuTypes.lowestPrice.uninterruptablePrice != null` before listing a type. |
 | image ref | pinned by **digest** | A moving tag must never change what a paid conversion produces. |
 
-**Cold start** is ~50–100 s (the image is ~8–9 GB). The conversion itself is ~3–5 s
-for a 28 s vocal on a 3090 (≈5× realtime), so a warm worker answers in seconds. The
-Laravel side polls for up to `poll_max_s = 480 s`, which comfortably covers a cold
-pull; a job that outlives it refunds the user in full.
+**Cold start dominates, and it differs per engine** — all measured on live endpoints:
+
+| Engine | Image | Cold start | Conversion (28 s vocal) | `poll_max_s` |
+|---|---|---|---|---|
+| `seedvc` | ~8 GB | ~98 s | 3–5 s | 480 s |
+| `soulx` | ~13 GB (2.8 GB ckpt) | **313 s** | ~12 s | **780 s** |
+
+A warm worker answers in seconds; the pull is the cost. Laravel gives each engine its
+own deadline (`config/paid-tools.php` → `voice_cover.engines.<id>.poll_max_s`, merged
+over the shared default) and `VoiceCoverJob::$timeout` must exceed the largest of
+them, or a dying queue worker strands the user's token hold. A job that outlives its
+deadline refunds the user in full.
+
+Shrinking the images (weights on a network volume instead of baked in) is the obvious
+next lever if cold-start latency ever becomes the complaint.
 
 `workersStandby` mirrors `workersMax` and is **not** settable via REST or GraphQL —
 it is derived, not an always-on worker count. Throttled workers do not bill.
