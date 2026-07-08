@@ -53,6 +53,24 @@ Audio prep (decode, mono, loudness) stays on the Laravel side (`VoiceCoverJob`);
 this worker is a thin GPU executor. The model loads **once** at boot, so warm
 requests skip the load.
 
+## Pitch semantics — `0` means `0`, in every engine
+
+The caller mixes our vocal back under **their own instrumental**, so any transposition we
+apply that they did not ask for returns an out-of-tune mix. Therefore:
+
+| `semi_tone_shift` | behaviour |
+|---|---|
+| `0` (default) | key untouched — the source's own pitch contour is the melody |
+| `-12`..`12` | shift by exactly that many semitones |
+| `"auto"` | engine matches the reference clip's register (SoulX only) |
+
+SoulX shipped with `auto_shift=(shift == 0)`, i.e. the *default* silently retuned the
+performance into the **reference clip's** register. Our reference is a short spoken
+liveness phrase whose pitch has nothing to do with the song, so seed-vc returned the
+song in key and SoulX returned it up an octave — same UI, same `0`, different music.
+Caught by measuring median f0 of both outputs (167 Hz vs 333 Hz) against the source.
+seed-vc always passed `auto_f0_adjust=False`; SoulX now matches it.
+
 ## Provenance watermark
 
 Every output carries an inaudible [Perth](https://github.com/resemble-ai/perth)
