@@ -13,8 +13,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # System libs: libsndfile for soundfile, ffmpeg for librosa/pydub decode,
 # libgomp for numpy/scipy OpenMP, git to fetch seed-vc.
+# build-essential: a few deps (e.g. resemblyzer→webrtcvad) ship source-only wheels.
+# The spike ran on RunPod's *devel* base which already had a compiler; python:slim
+# does not, so add one rather than discover it 40 minutes into a CI build.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libsndfile1 ffmpeg libgomp1 ca-certificates git \
+        libsndfile1 ffmpeg libgomp1 ca-certificates git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Torch first, from the CUDA 12.4 wheel index (seed-vc pins the 2.4.x line).
