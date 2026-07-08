@@ -1,0 +1,7 @@
+# The image builds on Linux — keep LF so Dockerfile RUN continuations and Python
+# scripts are never checked out with CRLF on a Windows dev box.
+* text=auto eol=lf
+*.py text eol=lf
+Dockerfile* text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
