@@ -58,8 +58,3 @@ GitHub Actions builds on every push to `main` and publishes to
 that image. No local Docker needed. Checkpoints are baked into the image for
 reliable cold starts.
 
-## CI
-
-The build workflow lives at `ci/build.yml`. Move it to
-`.github/workflows/build.yml` to activate (a token needs the `workflow` scope to
-push that path).
