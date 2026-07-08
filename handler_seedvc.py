@@ -170,4 +170,8 @@ def handler(event):
                     pass
 
 
-runpod.serverless.start({"handler": handler})
+# Guarded so the module can be IMPORTED and driven directly (GPU verification,
+# unit-style checks) without spawning the serverless loop. RunPod runs this file as
+# `python -u /handler.py`, i.e. __main__, so production behaviour is unchanged.
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
