@@ -15,7 +15,7 @@ SoulX needs torch 2.2 + NeMo), so they can't share a venv.
 | Tag | Model | License | Output |
 |---|---|---|---|
 | `:seedvc` | [Plachtaa/seed-vc](https://github.com/Plachtaa/seed-vc) | GPLv3 | 44.1 kHz, full band |
-| `:soulx` *(planned)* | [Soul-AILab/SoulX-Singer](https://github.com/Soul-AILab/SoulX-Singer) | Apache-2.0 | 24 kHz |
+| `:soulx` | [Soul-AILab/SoulX-Singer](https://github.com/Soul-AILab/SoulX-Singer) | Apache-2.0 | 24 kHz |
 
 Both were verified on real audio before this worker was written (rented RTX 3090,
 2026-07-08): each converts singing while preserving melody, phrasing and timing
@@ -23,7 +23,17 @@ from a 7–11 s zero-shot reference.
 
 **GPLv3 note:** seed-vc runs only here, on our own GPU, and is never distributed to
 users. GPLv3 (unlike AGPL) has no network clause, so no copyleft obligation is
-triggered by offering it as a service.
+triggered by offering it as a service. SoulX is Apache-2.0 (code *and* weights).
+
+**SoulX specifics.** Its CLI expects a precomputed F0 contour (`*.npy`) for both
+audios, so the handler runs the upstream RMVPE extractor per request, at upstream's
+defaults (24 kHz grid, hop 480) — the grid the checkpoint was trained on. Watch the
+naming: upstream calls the *voice reference* `prompt/pt` and the *audio to convert*
+`target/gt`, which is the opposite of this worker's `target_b64` / `source_b64`.
+`requirements-soulx.txt` is a **slim** set: upstream additionally pins nemo_toolkit,
+sageattention, gradio, torchcodec, webrtcvad and the g2p/MIDI tooling, none of which
+appear in `sys.modules` after the model + RMVPE load — verified on a real GPU, and
+the handler runs green without them.
 
 ## Contract
 

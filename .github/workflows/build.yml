@@ -4,10 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - "handler_seedvc.py"
-      - "bake_seedvc.py"
-      - "Dockerfile.seedvc"
-      - "requirements-seedvc.txt"
+      - "handler_*.py"
+      - "bake_*.py"
+      - "Dockerfile.*"
+      - "requirements-*.txt"
       - ".github/workflows/build.yml"
   workflow_dispatch: {}
 
@@ -16,15 +16,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  seedvc:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      # Independent images — one engine failing must not cancel the other.
+      fail-fast: false
+      matrix:
+        include:
+          - engine: seedvc
+            dockerfile: Dockerfile.seedvc
+          - engine: soulx
+            dockerfile: Dockerfile.soulx
+    name: build ${{ matrix.engine }}
     steps:
       - uses: actions/checkout@v4
 
-      # The image (torch+cuda+seed-vc checkpoints) is several GB — free the runner disk.
+      # torch + CUDA + baked checkpoints run to many GB — free the runner disk first.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -42,12 +52,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push (seed-vc)
+      - name: Build and push (${{ matrix.engine }})
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile.seedvc
+          file: ./${{ matrix.dockerfile }}
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:seedvc
+            ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}
           provenance: false

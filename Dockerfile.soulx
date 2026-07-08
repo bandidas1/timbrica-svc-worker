@@ -1,0 +1,42 @@
+# SoulX-Singer singing-voice-conversion serverless worker for RunPod.
+# Separate image from seed-vc on purpose: the two stacks conflict (seed-vc wants
+# torch 2.4 + huggingface-hub >= 0.28; SoulX pins torch 2.2 + transformers 4.41.2,
+# which requires hub < 1.0). One image per engine, one endpoint per image.
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/hf \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    SOULX_DIR=/soulx
+
+# libsndfile for soundfile, ffmpeg for librosa decode, libgomp for numpy/scipy,
+# git to fetch SoulX, build-essential because a few deps ship source-only wheels.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsndfile1 ffmpeg libgomp1 ca-certificates git build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# SoulX pins the torch 2.2 line.
+RUN pip install --no-cache-dir \
+        torch==2.2.0 torchaudio==2.2.0 \
+        --index-url https://download.pytorch.org/whl/cu121
+
+# Apache-2.0 code AND weights. Pinned to a commit so a silent upstream change can
+# never alter a paid result.
+ARG SOULX_REF=81aeb3ae772c70093c3de74dc23c92d983801ae4
+RUN git clone https://github.com/Soul-AILab/SoulX-Singer.git /soulx \
+    && cd /soulx && git checkout "$SOULX_REF" && rm -rf .git
+
+COPY requirements-soulx.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Bake the SVC checkpoint + RMVPE into the image → fast, reliable cold starts.
+# Non-fatal: if the builder can't fetch them, they download on first boot.
+COPY bake_soulx.py /tmp/bake_soulx.py
+RUN python /tmp/bake_soulx.py || echo "weight bake skipped (will download on first boot)"
+
+RUN python -c "import perth; perth.PerthImplicitWatermarker(); print('perth baked')" || echo "perth build-init skipped"
+
+COPY handler_soulx.py /handler.py
+CMD ["python", "-u", "/handler.py"]
