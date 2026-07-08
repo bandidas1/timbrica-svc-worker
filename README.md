@@ -64,6 +64,21 @@ apply that they did not ask for returns an out-of-tune mix. Therefore:
 | `-12`..`12` | shift by exactly that many semitones |
 | `"auto"` | engine matches the reference clip's register (SoulX only) |
 
+**Timbre transfer is register-coupled in SoulX, and it is not in seed-vc.** Same input
+pair (male performance 167 Hz, female reference 333 Hz), f0-invariant cepstral envelope,
+cosine similarity to the reference (baseline source↔reference = +0.383):
+
+| run | output f0 | key | →source | →reference |
+|---|---|---|---|---|
+| seed-vc, `0` | 167 Hz | in key | +0.568 | **+0.893** |
+| SoulX, `0` | 165 Hz | in key | +0.889 | +0.505 |
+| SoulX, `12` | 333 Hz | +12 st | +0.420 | **+0.980** |
+
+Explicit `12` reproduces the old `auto_shift` result exactly — `auto_shift` was only ever
+"pick +12". So SoulX transfers timbre well *only when the registers line up*; seed-vc does
+not need that. In the product, reference and performance are the same person, so they do
+line up — but this is why `seedvc` is the default engine.
+
 SoulX shipped with `auto_shift=(shift == 0)`, i.e. the *default* silently retuned the
 performance into the **reference clip's** register. Our reference is a short spoken
 liveness phrase whose pitch has nothing to do with the song, so seed-vc returned the
@@ -103,7 +118,12 @@ Verified live on 2026-07-08. Getting these wrong costs hours of misdiagnosis.
 | Engine | Image | Cold start | Conversion (28 s vocal) | `poll_max_s` |
 |---|---|---|---|---|
 | `seedvc` | ~8 GB | ~98 s | 3–5 s | 480 s |
-| `soulx` | ~13 GB (2.8 GB ckpt) | **313 s** | ~12 s | **780 s** |
+| `soulx` | ~13 GB (2.8 GB ckpt) | **313 / 587 / 751 s** | 12–19 s | **1080 s** |
+
+The SoulX cold pull is **not a stable number** — three fresh hosts gave 313 s, 587 s and
+751 s. At the original 780 s deadline the slowest of those cleared by 28 s; one slower
+pull and the caller is refunded instead of sung to. Do not tune this deadline against a
+single lucky measurement.
 
 A warm worker answers in seconds; the pull is the cost. Laravel gives each engine its
 own deadline (`config/paid-tools.php` → `voice_cover.engines.<id>.poll_max_s`, merged
