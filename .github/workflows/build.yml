@@ -53,11 +53,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Two tags on purpose. The moving one (`:seedvc`) is convenient; the immutable one
-      # (`:seedvc-<sha>`) is what a RunPod template must point at. Repointing a template at
-      # the SAME tag does not repull the image — verified 2026-07-09: after a rebuild and a
-      # workersMax 0→2 cycle, the endpoint still answered with the previous handler. Only a
-      # NEW image name makes the pull happen.
+      # Two tags on purpose. The moving one (`:seedvc`) is convenient to pull by hand; the
+      # immutable one (`:seedvc-<sha>`) is what you resolve to a digest and pin a RunPod
+      # template at. The templates hold `...@sha256:<digest>`, so a rebuild reaches nothing
+      # until the template's imageName is updated — 2026-07-09 a rebuilt `:soulx` plus a
+      # workersMax 0→2 cycle still answered with the previous handler, because the digest
+      # never moved. Updating the template is also not enough on its own: an already-running
+      # worker keeps its container, so drain to workersMax 0 (watch /health until
+      # workers.ready is 0) before scaling back up.
       - name: Build and push (${{ matrix.engine }})
         uses: docker/build-push-action@v6
         with:
@@ -71,4 +74,4 @@ jobs:
 
       - name: Image ref to pin the RunPod template at
         run: |
-          echo "::notice title=Pin this::ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}-${{ github.sha }}"
+          echo "::notice title=Resolve this tag to a digest and pin the template at it::ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}-${{ github.sha }}"
