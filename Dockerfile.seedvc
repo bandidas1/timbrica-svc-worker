@@ -42,5 +42,6 @@ RUN python /tmp/bake_seedvc.py || echo "weight bake skipped (will download on fi
 # Pre-init the Perth watermarker so its weights are baked too.
 RUN python -c "import perth; perth.PerthImplicitWatermarker(); print('perth baked')" || echo "perth build-init skipped"
 
+COPY svc_io.py /svc_io.py
 COPY handler_seedvc.py /handler.py
 CMD ["python", "-u", "/handler.py"]

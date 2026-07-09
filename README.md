@@ -37,17 +37,31 @@ the handler runs green without them.
 
 ## Contract
 
+**Audio never travels inside the JSON.** RunPod's gateway rejects any `/run` body
+over **10 MiB** (`bad request: body: exceeded max body size of 10MiB` — served as a
+400, or racily as a 502 from its edge, for the identical body), and the SDK warns
+that a result over **20 MB** belongs in storage. A mono 44.1 kHz WAV crosses 10 MiB
+at **~89 seconds**; a cover is a whole song. Timbrica therefore passes short-lived
+signed URLs and the worker streams the bytes itself (`svc_io.py`, stdlib only).
+
 **Input** (`event.input`):
 
 | field | type | notes |
 |---|---|---|
-| `source_b64` | string | the sung performance, WAV bytes, base64 |
-| `target_b64` | string | the target-voice reference, WAV bytes, base64 |
+| `source_url` | string | https URL to GET the sung performance (WAV) |
+| `target_url` | string | https URL to GET the target-voice reference (WAV) |
+| `result_put_url` | string | optional; https URL to PUT the converted WAV |
+| `source_b64` / `target_b64` | string | fallback for short clips when no `*_url` is given |
 | `semi_tone_shift` | int | optional, −12…12 (key matching), default 0 |
 | `diffusion_steps` | int | optional, 10…100, default 40 (30–50 best for singing) |
 
-**Output**: `{ audio_b64 (WAV, base64), sample_rate, gen_seconds, engine, watermarked }`
-or `{ error, detail }`.
+`*_url` wins over `*_b64`. Fetches retry 3× on 5xx/network; a 4xx is a verdict
+(expired signature, wrong job) and fails immediately.
+
+**Output**: `{ sample_rate, gen_seconds, engine, watermarked, bytes }` plus either
+`uploaded: true` (the WAV was PUT to `result_put_url`) or `audio_b64` (inlined).
+On failure: `{ error, detail }` — `transfer_failed` for the network/signature class,
+`convert_failed` for the model.
 
 Audio prep (decode, mono, loudness) stays on the Laravel side (`VoiceCoverJob`);
 this worker is a thin GPU executor. The model loads **once** at boot, so warm

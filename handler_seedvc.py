@@ -1,12 +1,15 @@
 # RunPod serverless handler — seed-vc singing voice conversion (SVC).
 #
-# Input  (event.input):
-#   source_b64      : the sung performance (WAV bytes, base64) — melody/lyrics/timing
-#   target_b64      : the target-voice reference (WAV bytes, base64) — the timbre
-#   semi_tone_shift : optional int, -12..12 (pitch shift for key matching)
-#   diffusion_steps : optional int, 10..100 (default 40; 30-50 best for singing)
-# Output: { audio_b64 (WAV, base64), sample_rate, gen_seconds, engine, watermarked }
-#      or { error, detail }
+# Input  (event.input) — audio arrives by signed URL, or base64 for small clips:
+#   source_url / source_b64 : the sung performance (WAV) — melody/lyrics/timing
+#   target_url / target_b64 : the target-voice reference (WAV) — the timbre
+#   result_put_url          : optional; PUT the WAV here instead of inlining it
+#   semi_tone_shift         : optional int, -12..12 (pitch shift for key matching)
+#   diffusion_steps         : optional int, 10..100 (default 40; 30-50 best for singing)
+# Output: { sample_rate, gen_seconds, engine, watermarked, bytes } plus either
+#         `audio_b64` (inline) or `uploaded: true` — or { error, detail }.
+# Why not base64: see svc_io.py. RunPod caps a /run body at 10 MiB, which a mono
+# 44.1 kHz WAV reaches after ~89 seconds. Songs are longer than that.
 #
 # The model is loaded ONCE at worker boot (module scope) so every warm request is
 # fast. Audio prep (decode/normalise) stays on the Laravel side; this worker is a
@@ -15,11 +18,9 @@
 # seed-vc is GPLv3. It runs ONLY here, on our own GPU, and is never distributed to
 # users — so no copyleft obligation is triggered (GPLv3 has no network clause).
 
-import base64
 import io
 import os
 import sys
-import tempfile
 import time
 import traceback
 import types
@@ -27,6 +28,8 @@ import types
 import numpy as np
 import runpod
 import soundfile as sf
+
+import svc_io
 
 SEED_VC_DIR = os.environ.get("SEED_VC_DIR", "/seed-vc")
 MAX_AUDIO_BYTES = int(os.environ.get("MAX_AUDIO_BYTES", str(64 * 1024 * 1024)))
@@ -124,37 +127,18 @@ except Exception as e:  # noqa: BLE001
     print(f"[boot] perth unavailable: {repr(e)[:200]}", flush=True)
 
 
-def _write_tmp(b64: str, prefix: str) -> str:
-    raw = base64.b64decode(b64, validate=True)
-    if len(raw) > MAX_AUDIO_BYTES:
-        raise ValueError("audio_too_large")
-    if len(raw) < 1000:
-        raise ValueError("audio_too_small")
-    f = tempfile.NamedTemporaryFile(prefix=prefix, suffix=".wav", delete=False)
-    f.write(raw)
-    f.close()
-    return f.name
-
-
 def handler(event):
     inp = event.get("input") or {}
     if not _READY:
         return {"error": _LOAD_ERR or "model_unavailable"}
-
-    src_b64 = inp.get("source_b64")
-    tgt_b64 = inp.get("target_b64")
-    if not src_b64 or not isinstance(src_b64, str):
-        return {"error": "source_b64_required"}
-    if not tgt_b64 or not isinstance(tgt_b64, str):
-        return {"error": "target_b64_required"}
 
     steps = max(10, min(100, int(inp.get("diffusion_steps") or 40)))
     shift = max(-12, min(12, int(inp.get("semi_tone_shift") or 0)))
 
     src_path = tgt_path = None
     try:
-        src_path = _write_tmp(src_b64, "svc_src_")
-        tgt_path = _write_tmp(tgt_b64, "svc_ref_")
+        src_path = svc_io.write_tmp(svc_io.fetch_audio(inp, "source", MAX_AUDIO_BYTES), "svc_src_")
+        tgt_path = svc_io.write_tmp(svc_io.fetch_audio(inp, "target", MAX_AUDIO_BYTES), "svc_ref_")
 
         t0 = time.time()
         full = None
@@ -183,13 +167,16 @@ def handler(event):
 
         buf = io.BytesIO()
         sf.write(buf, wave, int(sr_out), format="WAV", subtype="PCM_16")
-        return {
-            "audio_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
+        return svc_io.deliver(buf.getvalue(), inp, {
             "sample_rate": int(sr_out),
             "gen_seconds": gen_s,
             "engine": "seedvc",
             "watermarked": watermarked,
-        }
+        })
+    except svc_io.TransferError as e:
+        # Moving the audio failed, not the model. Keep them apart in the logs.
+        traceback.print_exc()
+        return {"error": "transfer_failed", "detail": str(e)[:300]}
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         return {"error": "convert_failed", "detail": repr(e)[:300]}

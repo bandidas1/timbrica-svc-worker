@@ -1,7 +1,9 @@
 # RunPod serverless handler — SoulX-Singer SVC (Apache-2.0 code AND weights).
 # Same contract as handler_seedvc.py:
-#   in : {source_b64, target_b64, semi_tone_shift, diffusion_steps}
-#   out: {audio_b64 (WAV), sample_rate, gen_seconds, engine, watermarked}
+#   in : {source_url|source_b64, target_url|target_b64, result_put_url?,
+#         semi_tone_shift, diffusion_steps}
+#   out: {sample_rate, gen_seconds, engine, watermarked, bytes} + audio_b64 | uploaded
+# Audio moves out of band by signed URL — RunPod caps a /run body at 10 MiB. See svc_io.py.
 #
 # Unlike seed-vc, SoulX needs an explicit F0 contour for BOTH audios (its CLI loads
 # precomputed .npy). We compute them per request with the same RMVPE extractor the
@@ -10,8 +12,10 @@
 #
 # Naming trap: upstream calls the VOICE reference `prompt/pt` and the audio to be
 # converted `target/gt`. Our contract is the other way round, so map carefully.
-import base64, io, os, sys, tempfile, time, traceback
+import io, os, sys, time, traceback
 import numpy as np, soundfile as sf, torch
+
+import svc_io
 
 SOULX_DIR = os.environ.get("SOULX_DIR", "/soulx")
 MAX_AUDIO_BYTES = int(os.environ.get("MAX_AUDIO_BYTES", str(64 * 1024 * 1024)))
@@ -60,19 +64,9 @@ try:
 except Exception as e:
     print(f"[boot] perth unavailable: {repr(e)[:200]}", flush=True)
 
-def _tmp(b64, prefix):
-    raw = base64.b64decode(b64, validate=True)
-    if len(raw) > MAX_AUDIO_BYTES: raise ValueError("audio_too_large")
-    if len(raw) < 1000: raise ValueError("audio_too_small")
-    f = tempfile.NamedTemporaryFile(prefix=prefix, suffix=".wav", delete=False)
-    f.write(raw); f.close(); return f.name
-
 def handler(event):
     inp = event.get("input") or {}
     if not _READY: return {"error": _LOAD_ERR or "model_unavailable"}
-    src_b64, tgt_b64 = inp.get("source_b64"), inp.get("target_b64")
-    if not src_b64 or not isinstance(src_b64, str): return {"error": "source_b64_required"}
-    if not tgt_b64 or not isinstance(tgt_b64, str): return {"error": "target_b64_required"}
     n_steps = max(10, min(100, int(inp.get("diffusion_steps") or 32)))
     # "0 semitones" MUST mean "do not touch the key" — the caller mixes our vocal back
     # under THEIR instrumental, so a silent transposition returns an out-of-tune mix.
@@ -88,8 +82,9 @@ def handler(event):
 
     src = tgt = None
     try:
-        src = _tmp(src_b64, "svc_src_")   # the sung performance  -> gt_*
-        tgt = _tmp(tgt_b64, "svc_ref_")   # the target voice      -> pt_*
+        # the sung performance -> gt_* ;  the target voice -> pt_*  (upstream's names are swapped)
+        src = svc_io.write_tmp(svc_io.fetch_audio(inp, "source", MAX_AUDIO_BYTES), "svc_src_")
+        tgt = svc_io.write_tmp(svc_io.fetch_audio(inp, "target", MAX_AUDIO_BYTES), "svc_ref_")
         sr = _config.audio.sample_rate
         t0 = time.time()
         pt_wav = _load_wav(tgt, sr).to(_device)
@@ -114,9 +109,13 @@ def handler(event):
                 print(f"[wm] failed: {repr(e)[:200]}", flush=True)
 
         buf = io.BytesIO(); sf.write(buf, audio, int(sr), format="WAV", subtype="PCM_16")
-        return {"audio_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
-                "sample_rate": int(sr), "gen_seconds": gen_s,
-                "engine": "soulx", "auto_shift": auto_shift, "pitch_shift": shift, "watermarked": watermarked}
+        return svc_io.deliver(buf.getvalue(), inp, {
+            "sample_rate": int(sr), "gen_seconds": gen_s, "engine": "soulx",
+            "auto_shift": auto_shift, "pitch_shift": shift, "watermarked": watermarked})
+    except svc_io.TransferError as e:
+        # Moving the audio failed, not the model. Keep them apart in the logs.
+        traceback.print_exc()
+        return {"error": "transfer_failed", "detail": str(e)[:300]}
     except Exception as e:
         traceback.print_exc()
         return {"error": "convert_failed", "detail": repr(e)[:300]}

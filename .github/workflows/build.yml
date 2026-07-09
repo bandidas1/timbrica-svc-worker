@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "handler_*.py"
+      - "svc_io.py"
       - "bake_*.py"
       - "Dockerfile.*"
       - "requirements-*.txt"

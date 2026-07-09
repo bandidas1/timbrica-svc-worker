@@ -38,5 +38,6 @@ RUN python /tmp/bake_soulx.py || echo "weight bake skipped (will download on fir
 
 RUN python -c "import perth; perth.PerthImplicitWatermarker(); print('perth baked')" || echo "perth build-init skipped"
 
+COPY svc_io.py /svc_io.py
 COPY handler_soulx.py /handler.py
 CMD ["python", "-u", "/handler.py"]
