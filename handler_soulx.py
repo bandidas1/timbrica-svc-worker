@@ -75,7 +75,10 @@ def handler(event):
     # song. seed-vc passes auto_f0_adjust=False for exactly this reason — match it.
     # Auto-matching stays available, but only when explicitly asked for.
     raw_shift = inp.get("semi_tone_shift") or 0
-    if isinstance(raw_shift, str) and raw_shift.strip().lower() == "auto":
+    # auto_f0_adjust is the uniform cross-engine signal (seed-vc reads the same
+    # field): modes B/C transpose the catalogue/composed melody into the user's
+    # register. Equivalent to the legacy semi_tone_shift="auto".
+    if bool(inp.get("auto_f0_adjust", False)) or (isinstance(raw_shift, str) and raw_shift.strip().lower() == "auto"):
         auto_shift, shift = True, 0
     else:
         auto_shift, shift = False, max(-12, min(12, int(raw_shift)))

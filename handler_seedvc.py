@@ -134,6 +134,13 @@ def handler(event):
 
     steps = max(10, min(100, int(inp.get("diffusion_steps") or 40)))
     shift = max(-12, min(12, int(inp.get("semi_tone_shift") or 0)))
+    # auto_f0_adjust: retune the SOURCE melody into the REFERENCE voice's register.
+    # OFF by default (mode A "sing yourself" — the source IS the user's own melody,
+    # keep their pitch). The caller sets it True for modes B/C, where the source is
+    # a catalogue/composed melody sung by someone else and must be transposed into
+    # the user's range — without it a woman singing a male-register melody (or vice
+    # versa) comes out badly (aksinia «голос ужасный», 2026-07-22; A/B-confirmed by ear).
+    auto_f0 = bool(inp.get("auto_f0_adjust", False))
 
     src_path = tgt_path = None
     try:
@@ -144,9 +151,12 @@ def handler(event):
         full = None
         # voice_conversion is a generator: it streams mp3 chunks and yields the
         # complete waveform as (sr, np.float32[]) on its final chunk.
-        # auto_f0_adjust=False — the source's own pitch contour IS the melody.
+        # auto_f0_adjust: False (mode A, keep the user's own melody pitch) or
+        # True (mode B/C, transpose the catalogue/composed melody into the user's
+        # register). Default False keeps the old behaviour for any caller that
+        # doesn't pass the field.
         for _chunk, full_out in app_svc.voice_conversion(
-            src_path, tgt_path, steps, 1.0, 0.7, False, shift
+            src_path, tgt_path, steps, 1.0, 0.7, auto_f0, shift
         ):
             if full_out is not None:
                 full = full_out
