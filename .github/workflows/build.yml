@@ -73,6 +73,57 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}-${{ github.sha }}
           provenance: false
 
+      # ── Does this image actually START? ────────────────────────────────────
+      #
+      # 2026-08-18 both SVC endpoints spent three days with workers that never
+      # reached "ready": jobs queued, nothing dispatched, $19.88 billed for 28.7
+      # worker-hours and zero completed jobs. A control run proved the endpoint
+      # and the hosts were fine — the same endpoint booted a different image in
+      # 425 s. The image itself could not start, and nobody could see why:
+      # RunPod shows worker logs only in its console, and a container that dies
+      # before the SDK starts leaves no trace in any API.
+      #
+      # So the check moves here, where it is free and repeatable. This is a real
+      # import of seed-vc / SoulX inside the built image — the exact thing a
+      # torch or CUDA change breaks — WITHOUT loading weights, so it costs
+      # seconds and no GPU. An image that cannot import can no longer reach a
+      # paid endpoint.
+      - name: Smoke — the image must import its own stack
+        run: |
+          set -eu
+          IMG="ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}-${{ github.sha }}"
+          docker pull "$IMG"
+          docker run --rm --entrypoint python "$IMG" - <<'PY'
+          import os, sys, types, traceback
+
+          def step(name, fn):
+              try:
+                  fn()
+                  print(f"  ok   {name}", flush=True)
+              except BaseException:
+                  print(f"  FAIL {name}", flush=True)
+                  traceback.print_exc()
+                  sys.exit(1)
+
+          import torch, torchaudio, numpy, soundfile
+          print(f"torch={torch.__version__} torchaudio={torchaudio.__version__} "
+                f"cuda={torch.version.cuda} numpy={numpy.__version__}", flush=True)
+
+          step("gpu_probe", lambda: __import__("gpu_probe"))
+          step("svc_io", lambda: __import__("svc_io"))
+
+          # The engine's own package — where a torch upgrade actually explodes
+          # (pinned deps compiled against an older ABI). No weights are loaded.
+          root = os.environ.get("SEED_VC_DIR") or os.environ.get("SOULX_DIR")
+          if root and os.path.isdir(root):
+              sys.path.insert(0, root)
+              os.chdir(root)
+              sys.modules.setdefault("gradio", types.ModuleType("gradio"))
+              mod = "app_svc" if "seed" in root else "soulxsinger"
+              step(f"{mod} (engine package)", lambda: __import__(mod))
+          print("image starts", flush=True)
+          PY
+
       - name: Image ref to pin the RunPod template at
         run: |
           echo "::notice title=Resolve this tag to a digest and pin the template at it::ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}-${{ github.sha }}"
