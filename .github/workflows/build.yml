@@ -83,46 +83,22 @@ jobs:
       # RunPod shows worker logs only in its console, and a container that dies
       # before the SDK starts leaves no trace in any API.
       #
-      # So the check moves here, where it is free and repeatable. This is a real
-      # import of seed-vc / SoulX inside the built image — the exact thing a
-      # torch or CUDA change breaks — WITHOUT loading weights, so it costs
-      # seconds and no GPU. An image that cannot import can no longer reach a
-      # paid endpoint.
+      # So the check moves here, where it is free and repeatable: a real import of
+      # seed-vc / SoulX inside the built image — the exact thing a torch or CUDA
+      # change breaks — WITHOUT loading weights, so it costs seconds and no GPU.
+      # An image that cannot import can no longer reach a paid endpoint.
+      #
+      # ⚠️ The check MUST prove it ran. The first version of this step was a
+      # shell heredoc; YAML mangled it, the container printed nothing, the step
+      # exited 0 and the build went green while the image was still unbootable.
+      # Hence a file in the repo, and a grep for a sentinel the script prints.
       - name: Smoke — the image must import its own stack
         run: |
-          set -eu
+          set -euo pipefail
           IMG="ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}-${{ github.sha }}"
-          docker pull "$IMG"
-          docker run --rm --entrypoint python "$IMG" - <<'PY'
-          import os, sys, types, traceback
-
-          def step(name, fn):
-              try:
-                  fn()
-                  print(f"  ok   {name}", flush=True)
-              except BaseException:
-                  print(f"  FAIL {name}", flush=True)
-                  traceback.print_exc()
-                  sys.exit(1)
-
-          import torch, torchaudio, numpy, soundfile
-          print(f"torch={torch.__version__} torchaudio={torchaudio.__version__} "
-                f"cuda={torch.version.cuda} numpy={numpy.__version__}", flush=True)
-
-          step("gpu_probe", lambda: __import__("gpu_probe"))
-          step("svc_io", lambda: __import__("svc_io"))
-
-          # The engine's own package — where a torch upgrade actually explodes
-          # (pinned deps compiled against an older ABI). No weights are loaded.
-          root = os.environ.get("SEED_VC_DIR") or os.environ.get("SOULX_DIR")
-          if root and os.path.isdir(root):
-              sys.path.insert(0, root)
-              os.chdir(root)
-              sys.modules.setdefault("gradio", types.ModuleType("gradio"))
-              mod = "app_svc" if "seed" in root else "soulxsinger"
-              step(f"{mod} (engine package)", lambda: __import__(mod))
-          print("image starts", flush=True)
-          PY
+          for i in 1 2 3; do docker pull "$IMG" && break || sleep 20; done
+          docker run --rm --entrypoint python "$IMG" /ci_smoke.py | tee smoke.txt
+          grep -q "IMAGE-STARTS-OK" smoke.txt
 
       - name: Image ref to pin the RunPod template at
         run: |

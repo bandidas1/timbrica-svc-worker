@@ -44,5 +44,6 @@ RUN python -c "import perth; perth.PerthImplicitWatermarker(); print('perth bake
 
 COPY svc_io.py /svc_io.py
 COPY gpu_probe.py /gpu_probe.py
+COPY ci_smoke.py /ci_smoke.py
 COPY handler_soulx.py /handler.py
 CMD ["python", "-u", "/handler.py"]
