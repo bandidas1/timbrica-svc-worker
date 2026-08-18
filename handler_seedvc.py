@@ -107,34 +107,53 @@ def _load():
     print(f"[boot] seed-vc ready sr={_m.sr} hop={_m.hop_length}", flush=True)
 
 
-# Say WHICH machine this is before doing anything on it. Every failure in this
-# worker's history was readable only as "the GPU was slow"; the host line is what
-# turns that into a fact somebody can act on.
+# ⚠️⚠️ NOTHING that touches the GPU may run at import. Boot only NAMES the host.
+#
+# This is the fix for the outage of 16–18 August 2026. The model used to be loaded
+# here, at module scope, i.e. BEFORE runpod.serverless.start() — so the worker
+# announced itself ready only after the load finished. Any GPU that was slow, or
+# that hung, or that could not run our kernels, left the worker in `initializing`
+# for as long as it lasted. Measured consequence: three days of `ready: 0`, jobs
+# queued and never dispatched, $19.88 billed for 28.7 worker-hours and ZERO
+# completed jobs — and no way to see the cause, because RunPod shows worker logs
+# only in its console and the container never got far enough to answer anything.
+#
+# A control run settled it: the same endpoint booted the stem-split image — which
+# loads its model lazily, on the first request — in 425 seconds. Same endpoint,
+# same hosts, same account. The difference was WHEN the model is loaded.
+#
+# So: become ready first, load on the first request (see _ensure_loaded). A GPU
+# problem then arrives as a job error carrying the host report, which is a thing
+# a person can read, instead of an invisible hang that bills by the hour.
 print(f"[boot] host={gpu_probe.host_report()}", flush=True)
 
-# Can this host launch a kernel at all? Ask in one second, before spending sixty
-# on loading a model that will never run. A host that cannot is not a broken job —
-# it is a machine to step off (see handler()).
-_GPU_ERR = None
-try:
-    gpu_probe.assert_gpu_usable()
-    print("[boot] gpu ok", flush=True)
-except gpu_probe.GpuUnusable as e:
-    _GPU_ERR = str(e)[:200]
-    print(f"[boot] gpu UNUSABLE: {_GPU_ERR}", flush=True)
+_GPU_ERR = None      # set by the first request, not at boot
+_LOAD_LOCK = __import__("threading").Lock()
 
-if _GPU_ERR is None:
-    try:
-        _load()
-    except Exception as e:  # noqa: BLE001
-        _LOAD_ERR = f"model_load_failed: {repr(e)[:300]}"
-        print(f"[boot] {_LOAD_ERR}", flush=True)
-        traceback.print_exc()
-else:
-    # Skipping the load deliberately: on an unusable host it burns a cold start to
-    # produce the same answer. The worker stays ALIVE so a probe can still ask it
-    # what it is — that visibility is the whole point.
-    _LOAD_ERR = f"gpu_unusable: {_GPU_ERR}"
+
+def _ensure_loaded() -> None:
+    """Load the model on FIRST USE. Idempotent, and safe under concurrent calls."""
+    global _LOAD_ERR, _GPU_ERR
+    if _READY or _LOAD_ERR:
+        return
+    with _LOAD_LOCK:
+        if _READY or _LOAD_ERR:
+            return
+        try:
+            # Prove the machine can launch a kernel before spending a minute on a
+            # model that would never run on it.
+            gpu_probe.assert_gpu_usable()
+        except gpu_probe.GpuUnusable as e:
+            _GPU_ERR = str(e)[:200]
+            _LOAD_ERR = f"gpu_unusable: {_GPU_ERR}"
+            print(f"[load] gpu UNUSABLE: {_GPU_ERR}", flush=True)
+            return
+        try:
+            _load()
+        except Exception as e:  # noqa: BLE001
+            _LOAD_ERR = f"model_load_failed: {repr(e)[:300]}"
+            print(f"[load] {_LOAD_ERR}", flush=True)
+            traceback.print_exc()
 
 
 # ---- inaudible provenance watermark ------------------------------------------
@@ -157,6 +176,11 @@ def handler(event):
     # you, and can you? Costs no model, no download, no tokens.
     if inp.get("probe"):
         return gpu_probe.probe_result()
+
+    # First real request pays for the model load — the worker is already `ready`,
+    # so a slow or hostile GPU costs THIS job a wait instead of hanging the whole
+    # container in `initializing` forever.
+    _ensure_loaded()
 
     # A REAL job on a host that cannot launch a kernel must NOT be answered with an
     # error: that spends the caller's one paid attempt proving the machine is

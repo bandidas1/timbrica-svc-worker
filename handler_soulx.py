@@ -53,31 +53,39 @@ def _load():
     _READY = True
     print(f"[boot] soulx ready sr={_config.audio.sample_rate} device={_device}", flush=True)
 
-# Say WHICH machine this is, then ask whether it can launch a kernel at all —
-# one second, before spending sixty on a model that would never run. See
-# gpu_probe.py for why: RunPod fills "24 GB" GPU classes with Blackwell slices
-# our images have no kernels for, and until a worker could name its host every
-# such failure read as "the GPU was slow".
+# ⚠️⚠️ NOTHING that touches the GPU may run at import. Boot only NAMES the host.
+# Full reasoning in handler_seedvc.py; short form: the model used to load here,
+# BEFORE runpod.serverless.start(), so the worker announced itself ready only
+# after the load. Any GPU that was slow or hostile left it in `initializing` —
+# three days of it, 28.7 billed worker-hours and zero completed jobs, invisible
+# because RunPod shows worker logs only in its console. A control run proved the
+# point: the same endpoint booted the lazily-loading stem-split image in 425 s.
 print(f"[boot] host={gpu_probe.host_report()}", flush=True)
-_GPU_ERR = None
-try:
-    gpu_probe.assert_gpu_usable()
-    print("[boot] gpu ok", flush=True)
-except gpu_probe.GpuUnusable as e:
-    _GPU_ERR = str(e)[:200]
-    print(f"[boot] gpu UNUSABLE: {_GPU_ERR}", flush=True)
 
-if _GPU_ERR is None:
-    try:
-        _load()
-    except Exception as e:
-        _LOAD_ERR = f"model_load_failed: {repr(e)[:300]}"
-        print(f"[boot] {_LOAD_ERR}", flush=True); traceback.print_exc()
-else:
-    # Deliberately skipping the load: on an unusable host it burns a cold start
-    # to reach the same answer. The worker stays ALIVE so a probe can still ask
-    # it what it is — that visibility is the whole point.
-    _LOAD_ERR = f"gpu_unusable: {_GPU_ERR}"
+_GPU_ERR = None      # set by the first request, not at boot
+_LOAD_LOCK = __import__("threading").Lock()
+
+
+def _ensure_loaded():
+    """Load on FIRST USE. Idempotent and safe under concurrent requests."""
+    global _LOAD_ERR, _GPU_ERR
+    if _READY or _LOAD_ERR:
+        return
+    with _LOAD_LOCK:
+        if _READY or _LOAD_ERR:
+            return
+        try:
+            gpu_probe.assert_gpu_usable()
+        except gpu_probe.GpuUnusable as e:
+            _GPU_ERR = str(e)[:200]
+            _LOAD_ERR = f"gpu_unusable: {_GPU_ERR}"
+            print(f"[load] gpu UNUSABLE: {_GPU_ERR}", flush=True)
+            return
+        try:
+            _load()
+        except Exception as e:
+            _LOAD_ERR = f"model_load_failed: {repr(e)[:300]}"
+            print(f"[load] {_LOAD_ERR}", flush=True); traceback.print_exc()
 
 _WM = None
 try:
@@ -96,6 +104,10 @@ def handler(event):
     # an error: that spends the caller's paid attempt proving the machine is
     # broken, and the retry lands on the same warm worker. Exiting hands the job
     # back to RunPod, which reschedules it where it can actually run.
+    # First real request pays for the model load — the worker is already `ready`,
+    # so a slow GPU costs THIS job a wait instead of hanging the container.
+    _ensure_loaded()
+
     if _GPU_ERR is not None:
         print(f"[gpu-unusable] {_GPU_ERR} host={gpu_probe.host_report()}", flush=True)
         os._exit(1)
