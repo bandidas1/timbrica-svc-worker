@@ -20,10 +20,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 ffmpeg libgomp1 ca-certificates git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Torch first, from the CUDA 12.4 wheel index (seed-vc pins the 2.4.x line).
+# torch 2.7.1 / CUDA 12.8 — and the CUDA version is the point.
+#
+# Measured 2026-08-18: RunPod fills this account's GPU CLASSES with slices of
+# "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG" (sm_120), and images built
+# against CUDA <= 12.4 carry no kernels for it. The stem-split worker showed the
+# whole shape: its endpoint sat with workers permanently "initializing" and jobs
+# undispatched, and recovered the moment its image moved to CUDA 12.8 — nothing
+# else changed. Both SVC endpoints are in exactly that state, and /voice-cover
+# logged 22 `svc_timeout` failures in August, 21 of them on the two days the
+# splitter began failing the same way.
+#
+# The GPU allow-list cannot fix this: it holds CLASSES, RunPod puts new cards in
+# them, and widening seedvc's list from 4 to 8 types changed nothing (measured).
+#
+# ⚠️ seed-vc upstream pins the 2.4.x line, so running it on 2.7 is a deliberate
+# trade. If the model stops loading, the worker now SAYS so (gpu_probe host
+# report) instead of hanging — which is the state it is in today.
 RUN pip install --no-cache-dir \
-        torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
-        --index-url https://download.pytorch.org/whl/cu124
+        torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
+        --index-url https://download.pytorch.org/whl/cu128
 
 # seed-vc itself (GPLv3 — executed only on our own GPU, never distributed).
 # Pinned to a commit so a silent upstream change can never alter a paid result.

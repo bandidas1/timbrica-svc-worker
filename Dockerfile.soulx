@@ -17,10 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 ffmpeg libgomp1 ca-certificates git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# SoulX pins the torch 2.2 line.
+# torch 2.7.1 / CUDA 12.8 — see the long note in Dockerfile.seedvc. Short form:
+# RunPod now serves this account's GPU classes with Blackwell (sm_120) slices,
+# and cu121 has no kernels for them; the endpoint's workers never reach "ready".
+# ⚠️ SoulX upstream pins the torch 2.2 line — a deliberate trade, and the worker
+# now reports its host instead of hanging if the model stops loading.
 RUN pip install --no-cache-dir \
-        torch==2.2.0 torchaudio==2.2.0 \
-        --index-url https://download.pytorch.org/whl/cu121
+        torch==2.7.1 torchaudio==2.7.1 \
+        --index-url https://download.pytorch.org/whl/cu128
 
 # Apache-2.0 code AND weights. Pinned to a commit so a silent upstream change can
 # never alter a paid result.
