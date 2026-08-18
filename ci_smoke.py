@@ -67,6 +67,21 @@ def main() -> None:
         print("  ??   engine dir not found (%r) — engine import NOT verified" % root, flush=True)
         sys.exit(1)
 
+    # ⚠️ Веса, которые handler грузит по ФИКСИРОВАННЫМ путям. Их запекание
+    # обрезано вручную (bake_soulx.py качает 3 ГБ из 12.5), и ошибка в маске
+    # ignore_patterns иначе всплыла бы только на первом платном запросе.
+    need = {
+        '/seed-vc': [],
+        '/soulx': ['pretrained_models/SoulX-Singer/model-svc.pt',
+                   'pretrained_models/SoulX-Singer-Preprocess/rmvpe/rmvpe.pt'],
+    }.get(root, [])
+    for rel in need:
+        full = os.path.join(root, rel)
+        if not os.path.isfile(full):
+            print('  FAIL вес не запечён: %s' % rel, flush=True)
+            sys.exit(1)
+        print('  ok   вес %s (%.2f ГБ)' % (rel, os.path.getsize(full) / 1e9), flush=True)
+
     print(SENTINEL, flush=True)
 
 
