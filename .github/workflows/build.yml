@@ -2,10 +2,11 @@ name: build-and-push
 
 on:
   push:
-    branches: [main]
+    branches: [main, gpu-probe]
     paths:
       - "handler_*.py"
       - "svc_io.py"
+      - "gpu_probe.py"
       - "bake_*.py"
       - "Dockerfile.*"
       - "requirements-*.txt"
@@ -68,7 +69,7 @@ jobs:
           file: ./${{ matrix.dockerfile }}
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}
+            ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}${{ github.ref_name == 'main' && '' || format('-{0}', github.ref_name) }}
             ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ matrix.engine }}-${{ github.sha }}
           provenance: false
 

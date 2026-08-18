@@ -29,6 +29,7 @@ import numpy as np
 import runpod
 import soundfile as sf
 
+import gpu_probe
 import svc_io
 
 SEED_VC_DIR = os.environ.get("SEED_VC_DIR", "/seed-vc")
@@ -106,12 +107,34 @@ def _load():
     print(f"[boot] seed-vc ready sr={_m.sr} hop={_m.hop_length}", flush=True)
 
 
+# Say WHICH machine this is before doing anything on it. Every failure in this
+# worker's history was readable only as "the GPU was slow"; the host line is what
+# turns that into a fact somebody can act on.
+print(f"[boot] host={gpu_probe.host_report()}", flush=True)
+
+# Can this host launch a kernel at all? Ask in one second, before spending sixty
+# on loading a model that will never run. A host that cannot is not a broken job —
+# it is a machine to step off (see handler()).
+_GPU_ERR = None
 try:
-    _load()
-except Exception as e:  # noqa: BLE001
-    _LOAD_ERR = f"model_load_failed: {repr(e)[:300]}"
-    print(f"[boot] {_LOAD_ERR}", flush=True)
-    traceback.print_exc()
+    gpu_probe.assert_gpu_usable()
+    print("[boot] gpu ok", flush=True)
+except gpu_probe.GpuUnusable as e:
+    _GPU_ERR = str(e)[:200]
+    print(f"[boot] gpu UNUSABLE: {_GPU_ERR}", flush=True)
+
+if _GPU_ERR is None:
+    try:
+        _load()
+    except Exception as e:  # noqa: BLE001
+        _LOAD_ERR = f"model_load_failed: {repr(e)[:300]}"
+        print(f"[boot] {_LOAD_ERR}", flush=True)
+        traceback.print_exc()
+else:
+    # Skipping the load deliberately: on an unusable host it burns a cold start to
+    # produce the same answer. The worker stays ALIVE so a probe can still ask it
+    # what it is — that visibility is the whole point.
+    _LOAD_ERR = f"gpu_unusable: {_GPU_ERR}"
 
 
 # ---- inaudible provenance watermark ------------------------------------------
@@ -129,8 +152,23 @@ except Exception as e:  # noqa: BLE001
 
 def handler(event):
     inp = event.get("input") or {}
+
+    # A free question, answerable even on a machine that cannot compute: who are
+    # you, and can you? Costs no model, no download, no tokens.
+    if inp.get("probe"):
+        return gpu_probe.probe_result()
+
+    # A REAL job on a host that cannot launch a kernel must NOT be answered with an
+    # error: that spends the caller's one paid attempt proving the machine is
+    # broken, and the retry lands on the same warm worker. Exiting hands the job
+    # back to RunPod, which reschedules it somewhere that works, and this container
+    # is offered no more work.
+    if _GPU_ERR is not None:
+        print(f"[gpu-unusable] {_GPU_ERR} host={gpu_probe.host_report()}", flush=True)
+        os._exit(1)
+
     if not _READY:
-        return {"error": _LOAD_ERR or "model_unavailable"}
+        return {"error": _LOAD_ERR or "model_unavailable", "host": gpu_probe.host_report()}
 
     steps = max(10, min(100, int(inp.get("diffusion_steps") or 40)))
     shift = max(-12, min(12, int(inp.get("semi_tone_shift") or 0)))

@@ -15,6 +15,7 @@
 import io, os, sys, time, traceback
 import numpy as np, soundfile as sf, torch
 
+import gpu_probe
 import svc_io
 
 SOULX_DIR = os.environ.get("SOULX_DIR", "/soulx")
@@ -52,11 +53,31 @@ def _load():
     _READY = True
     print(f"[boot] soulx ready sr={_config.audio.sample_rate} device={_device}", flush=True)
 
+# Say WHICH machine this is, then ask whether it can launch a kernel at all —
+# one second, before spending sixty on a model that would never run. See
+# gpu_probe.py for why: RunPod fills "24 GB" GPU classes with Blackwell slices
+# our images have no kernels for, and until a worker could name its host every
+# such failure read as "the GPU was slow".
+print(f"[boot] host={gpu_probe.host_report()}", flush=True)
+_GPU_ERR = None
 try:
-    _load()
-except Exception as e:
-    _LOAD_ERR = f"model_load_failed: {repr(e)[:300]}"
-    print(f"[boot] {_LOAD_ERR}", flush=True); traceback.print_exc()
+    gpu_probe.assert_gpu_usable()
+    print("[boot] gpu ok", flush=True)
+except gpu_probe.GpuUnusable as e:
+    _GPU_ERR = str(e)[:200]
+    print(f"[boot] gpu UNUSABLE: {_GPU_ERR}", flush=True)
+
+if _GPU_ERR is None:
+    try:
+        _load()
+    except Exception as e:
+        _LOAD_ERR = f"model_load_failed: {repr(e)[:300]}"
+        print(f"[boot] {_LOAD_ERR}", flush=True); traceback.print_exc()
+else:
+    # Deliberately skipping the load: on an unusable host it burns a cold start
+    # to reach the same answer. The worker stays ALIVE so a probe can still ask
+    # it what it is — that visibility is the whole point.
+    _LOAD_ERR = f"gpu_unusable: {_GPU_ERR}"
 
 _WM = None
 try:
@@ -66,7 +87,20 @@ except Exception as e:
 
 def handler(event):
     inp = event.get("input") or {}
-    if not _READY: return {"error": _LOAD_ERR or "model_unavailable"}
+
+    # Free question, answerable even by a machine that cannot compute.
+    if inp.get("probe"):
+        return gpu_probe.probe_result()
+
+    # A REAL job on a host that cannot launch a kernel must NOT be answered with
+    # an error: that spends the caller's paid attempt proving the machine is
+    # broken, and the retry lands on the same warm worker. Exiting hands the job
+    # back to RunPod, which reschedules it where it can actually run.
+    if _GPU_ERR is not None:
+        print(f"[gpu-unusable] {_GPU_ERR} host={gpu_probe.host_report()}", flush=True)
+        os._exit(1)
+
+    if not _READY: return {"error": _LOAD_ERR or "model_unavailable", "host": gpu_probe.host_report()}
     n_steps = max(10, min(100, int(inp.get("diffusion_steps") or 32)))
     # "0 semitones" MUST mean "do not touch the key" — the caller mixes our vocal back
     # under THEIR instrumental, so a silent transposition returns an out-of-tune mix.
