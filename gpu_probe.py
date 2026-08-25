@@ -62,13 +62,40 @@ def assert_gpu_usable() -> None:
     `.item()` is the point: it synchronises, so a CUDA error that would otherwise
     surface minutes later — in the middle of a paid conversion — surfaces here, in
     about a second, before anything has been downloaded or charged.
+
+    WHY FOUR KERNELS AND NOT JUST THE MATMUL. Measured 2026-08-25 on an RTX 4060:
+    torch's own kernels, cuBLAS and cuDNN are separate binaries with separate
+    architecture coverage, and they load lazily and independently — first touch cost
+    31 ms / 140 ms / 113 ms respectively. A matmul only proves cuBLAS can run here.
+    On the axis this endpoint actually broke along (2026-08-18: L4, L40S and A5000
+    died while RTX 4090 and RTX 4000 Ada were fine — sm_89 on BOTH sides of the
+    split, so the broken thing was the host, not the card), a probe that exercises
+    one provider can pass while the provider the model needs cannot. All four cost
+    0.4 ms once the context is warm; the first one pays ~300 ms for context setup.
+
+    ⛔ WHAT THIS MUST NEVER BECOME is a comparison against torch.cuda.get_arch_list().
+    Measured on the same card: capability sm_89 is ABSENT from the arch list
+    ['sm_50' … 'sm_86', 'sm_90'] while matmul, conv2d, elementwise and fp16 all run,
+    because CUDA is binary compatible inside a major version. That "obvious" check
+    would reject RTX 4090, L4, L40S and RTX 4000 Ada — most of the fleet we run on.
     """
     try:
         import torch
         if not torch.cuda.is_available():
             return  # CPU box (local mock): nothing to prove
+        # torch's own kernels — elementwise and reduction
+        (torch.ones(1024, device="cuda") * 2 + 1).sum().item()
+        # cuBLAS
         a = torch.ones(64, 64, device="cuda")
         (a @ a).sum().item()
+        # cuDNN
+        torch.nn.functional.conv2d(
+            torch.zeros(1, 2, 8, 8, device="cuda"),
+            torch.zeros(2, 2, 3, 3, device="cuda"),
+        )
+        # fp16 — the dtype the models actually infer in
+        (torch.ones(256, device="cuda", dtype=torch.float16) * 2).sum().item()
+        torch.cuda.synchronize()
     except GpuUnusable:
         raise
     except Exception as exc:  # noqa: BLE001
