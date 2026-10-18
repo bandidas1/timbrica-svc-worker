@@ -24,7 +24,11 @@ python-dotenv
 
 # provenance watermark + serverless runtime
 resemble-perth
-# Pinned 2026-10-18: a newer SDK pulls opentelemetry-exporter-otlp-proto-http
-# (protobuf>=5), which cannot coexist with descript-audiotools (protobuf<3.20) —
-# the seedvc image stopped building. 1.12.0 is what the last green build resolved.
+# Pinned 2026-10-18: runpod needs fastapi[all] with no upper bound, and fastapi's
+# newer [all] pulls opentelemetry-exporter-otlp-proto-http (protobuf>=5), which
+# cannot coexist with descript-audiotools (protobuf<3.20) — the seedvc image
+# stopped building. These are the versions the last green build (2026-08-25) resolved.
 runpod==1.12.0
+fastapi==0.141.1
+fastapi-cli==0.0.32
+fastapi-cloud-cli==0.23.0
