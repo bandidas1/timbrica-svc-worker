@@ -24,4 +24,7 @@ python-dotenv
 
 # provenance watermark + serverless runtime
 resemble-perth
-runpod>=1.7.0
+# Pinned 2026-10-18: a newer SDK pulls opentelemetry-exporter-otlp-proto-http
+# (protobuf>=5), which cannot coexist with descript-audiotools (protobuf<3.20) —
+# the seedvc image stopped building. 1.12.0 is what the last green build resolved.
+runpod==1.12.0
