@@ -6,6 +6,12 @@
 #   result_put_url          : optional; PUT the WAV here instead of inlining it
 #   semi_tone_shift         : optional int, -12..12 (pitch shift for key matching)
 #   diffusion_steps         : optional int, 10..100 (default 40; 30-50 best for singing)
+#   model                   : optional, "svc" (default — the 44.1 kHz F0-conditioned
+#                             singing model, /voice-cover), "speech" (v1 22.05 kHz
+#                             speech model) or "v2" (seed-vc v2 CFM, timbre only —
+#                             /voice-gender). "speech" and "v2" ignore
+#                             semi_tone_shift / auto_f0_adjust: they take the register
+#                             from the reference itself.
 # Output: { sample_rate, gen_seconds, engine, watermarked, bytes } plus either
 #         `audio_b64` (inline) or `uploaded: true` — or { error, detail }.
 # Why not base64: see svc_io.py. RunPod caps a /run body at 10 MiB, which a mono
@@ -34,6 +40,9 @@ import svc_io
 
 SEED_VC_DIR = os.environ.get("SEED_VC_DIR", "/seed-vc")
 MAX_AUDIO_BYTES = int(os.environ.get("MAX_AUDIO_BYTES", str(64 * 1024 * 1024)))
+# model="v2": sources longer than this run on a shortened reference (see handler)
+V2_LONG_SOURCE_S = float(os.environ.get("V2_LONG_SOURCE_S", "60"))
+V2_LONG_REF_S = float(os.environ.get("V2_LONG_REF_S", "12"))
 
 # app_svc resolves configs relative to the repo root and imports `modules.*`.
 sys.path.insert(0, SEED_VC_DIR)
@@ -105,6 +114,87 @@ def _load():
     app_svc = _m
     _READY = True
     print(f"[boot] seed-vc ready sr={_m.sr} hop={_m.hop_length}", flush=True)
+
+
+# ---- the SPEECH model, loaded on its first request -----------------------------
+# Measured 2026-10-18 on 36 pairs of real Russian speech (FLEURS, 6 male + 6 female
+# readers, our four catalogue voices as targets, same commit as this image):
+#
+#                                 target sim   source leak   UTMOS   WER    F0 miss
+#   svc 44.1 kHz, 40 steps (old)     0.819        0.187        2.56   7.9 %  1.11 st
+#   speech 22.05 kHz, 30 steps       0.870        0.160        2.75   8.4 %  0.59 st
+#   v2 CFM, 30 steps                 0.833        0.134        3.29   7.5 %  0.79 st
+#
+# The singing model keeps the speaker's own F0 contour shifted by whole semitones;
+# on speech that leaves the result less like the target and less natural than the
+# INPUT (source UTMOS 2.82). The speech models take the register from the
+# reference. v2 is the most natural of all (34 of 36 pairs over "speech") and lets
+# the least of the speaker through; "speech" lands closest to the exact target.
+# Both load lazily so /voice-cover's boot and memory stay as they were.
+_SPEECH = None
+_SPEECH_ERR = None
+_V2 = None
+_V2_ERR = None
+_V2_ARGS = None
+
+
+def _ensure_v2():
+    global _V2, _V2_ERR, _V2_ARGS
+    if _V2 is not None or _V2_ERR:
+        return
+    with _LOAD_LOCK:
+        if _V2 is not None or _V2_ERR:
+            return
+        try:
+            from types import SimpleNamespace
+
+            import inference_v2 as _i
+
+            _V2_ARGS = SimpleNamespace(
+                diffusion_steps=30, length_adjust=1.0, compile=False,
+                intelligibility_cfg_rate=0.7, similarity_cfg_rate=0.7, top_p=0.9,
+                temperature=1.0, repetition_penalty=1.0, convert_style=False,
+                anonymization_only=False, ar_checkpoint_path=None, cfm_checkpoint_path=None,
+            )
+            _i.vc_wrapper_v2 = _i.load_v2_models(_V2_ARGS)
+            _V2 = _i
+            print("[load] seed-vc v2 ready", flush=True)
+        except Exception as e:  # noqa: BLE001
+            _V2_ERR = f"v2_model_load_failed: {repr(e)[:300]}"
+            print(f"[load] {_V2_ERR}", flush=True)
+            traceback.print_exc()
+
+
+def _ensure_speech():
+    global _SPEECH, _SPEECH_ERR
+    if _SPEECH is not None or _SPEECH_ERR:
+        return
+    with _LOAD_LOCK:
+        if _SPEECH is not None or _SPEECH_ERR:
+            return
+        try:
+            from types import SimpleNamespace
+
+            import torch
+            import app_vc as _v
+
+            _v.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            _v.AudioSegment = _DiscardedSegment
+            args = SimpleNamespace(checkpoint=None, config=None, share=False, fp16=True, gpu=0)
+            (_v.model, _v.semantic_fn, _v.vocoder_fn, _v.campplus_model,
+             _v.to_mel, _v.mel_fn_args) = _v.load_models(args)
+            sr = getattr(_v, "sr", None) or _v.mel_fn_args.get("sampling_rate")
+            hop = getattr(_v, "hop_length", None) or _v.mel_fn_args.get("hop_size")
+            _v.sr = int(sr)
+            _v.hop_length = int(hop)
+            _v.max_context_window = _v.sr // _v.hop_length * 30
+            _v.overlap_wave_len = _v.overlap_frame_len * _v.hop_length
+            _SPEECH = _v
+            print(f"[load] seed-vc speech model ready sr={_v.sr}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            _SPEECH_ERR = f"speech_model_load_failed: {repr(e)[:300]}"
+            print(f"[load] {_SPEECH_ERR}", flush=True)
+            traceback.print_exc()
 
 
 # ⚠️⚠️ NOTHING that touches the GPU may run at import. Boot only NAMES the host.
@@ -204,7 +294,19 @@ def handler(event):
     # versa) comes out badly (aksinia «голос ужасный», 2026-07-22; A/B-confirmed by ear).
     auto_f0 = bool(inp.get("auto_f0_adjust", False))
 
-    src_path = tgt_path = None
+    model = str(inp.get("model") or "svc")
+    if model not in ("svc", "speech", "v2"):
+        return {"error": "unknown_model", "detail": model[:40]}
+    if model == "speech":
+        _ensure_speech()
+        if _SPEECH is None:
+            return {"error": _SPEECH_ERR or "speech_model_unavailable", "host": gpu_probe.host_report()}
+    if model == "v2":
+        _ensure_v2()
+        if _V2 is None:
+            return {"error": _V2_ERR or "v2_model_unavailable", "host": gpu_probe.host_report()}
+
+    src_path = tgt_path = trimmed_ref = None
     try:
         src_path = svc_io.write_tmp(svc_io.fetch_audio(inp, "source", MAX_AUDIO_BYTES), "svc_src_")
         tgt_path = svc_io.write_tmp(svc_io.fetch_audio(inp, "target", MAX_AUDIO_BYTES), "svc_ref_")
@@ -217,11 +319,34 @@ def handler(event):
         # True (mode B/C, transpose the catalogue/composed melody into the user's
         # register). Default False keeps the old behaviour for any caller that
         # doesn't pass the field.
-        for _chunk, full_out in app_svc.voice_conversion(
-            src_path, tgt_path, steps, 1.0, 0.7, auto_f0, shift
-        ):
-            if full_out is not None:
-                full = full_out
+        if model == "v2":
+            # v2 works in 30-second windows and spends up to 25 s of each on the
+            # reference, leaving ~5 s of source per pass: a 3-minute take was
+            # 467 s on an RTX 4060 laptop (RTF 2.6). A 12-second reference leaves
+            # 18 s per pass (36 pairs: target sim 0.833 → 0.811, UTMOS 3.29 →
+            # 3.21). Short takes — 90 % of real ones are under 35 s — keep the full
+            # reference; long ones trade a little likeness for finishing inside the
+            # caller's poll window.
+            ref_for_run = tgt_path
+            try:
+                src_s = sf.info(src_path).duration
+            except Exception:  # noqa: BLE001
+                src_s = 0.0
+            if src_s > V2_LONG_SOURCE_S:
+                ref, ref_sr = sf.read(tgt_path, dtype="float32", always_2d=True)
+                ref_for_run = svc_io.write_tmp(b"", "svc_ref12_")
+                sf.write(ref_for_run, ref[: int(ref_sr * V2_LONG_REF_S)].mean(axis=1), ref_sr, format="WAV")
+                trimmed_ref = ref_for_run
+            _V2_ARGS.diffusion_steps = steps
+            full = _V2.convert_voice_v2(src_path, ref_for_run, _V2_ARGS)
+        else:
+            if model == "speech":
+                gen = _SPEECH.voice_conversion(src_path, tgt_path, steps, 1.0, 0.7)
+            else:
+                gen = app_svc.voice_conversion(src_path, tgt_path, steps, 1.0, 0.7, auto_f0, shift)
+            for _chunk, full_out in gen:
+                if full_out is not None:
+                    full = full_out
         if full is None:
             return {"error": "conversion_produced_nothing"}
 
@@ -243,6 +368,7 @@ def handler(event):
             "sample_rate": int(sr_out),
             "gen_seconds": gen_s,
             "engine": "seedvc",
+            "model": model,
             "watermarked": watermarked,
         })
     except svc_io.TransferError as e:
@@ -253,7 +379,7 @@ def handler(event):
         traceback.print_exc()
         return {"error": "convert_failed", "detail": repr(e)[:300]}
     finally:
-        for p in (src_path, tgt_path):
+        for p in (src_path, tgt_path, trimmed_ref):
             if p:
                 try:
                     os.unlink(p)

@@ -22,3 +22,31 @@ app_svc.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 app_svc.load_models(SimpleNamespace(checkpoint=None, config=None, share=False, fp16=False, gpu=0))
 print("seed-vc weights baked", flush=True)
+
+# The SPEECH model (/voice-gender, model="speech"): its DiT checkpoint, the 22 kHz
+# BigVGAN and Whisper-small. Same non-fatal contract — a failed bake only means the
+# first speech request downloads them.
+try:
+    import app_vc  # noqa: E402
+
+    app_vc.device = app_svc.device
+    app_vc.load_models(SimpleNamespace(checkpoint=None, config=None, share=False, fp16=False, gpu=0))
+    print("seed-vc speech weights baked", flush=True)
+except Exception as e:  # noqa: BLE001
+    print(f"speech weight bake skipped: {e!r}"[:300], flush=True)
+
+# seed-vc v2 (model="v2"): CFM + AR checkpoints, the two content extractors, the
+# style encoder and its vocoder. load_v2_models() also moves them to the device —
+# on the CPU builder that is just memory.
+try:
+    import inference_v2  # noqa: E402
+
+    inference_v2.device = app_svc.device
+    inference_v2.dtype = torch.float32
+    inference_v2.load_v2_models(SimpleNamespace(
+        diffusion_steps=30, length_adjust=1.0, compile=False, intelligibility_cfg_rate=0.7,
+        similarity_cfg_rate=0.7, top_p=0.9, temperature=1.0, repetition_penalty=1.0,
+        convert_style=False, anonymization_only=False, ar_checkpoint_path=None, cfm_checkpoint_path=None))
+    print("seed-vc v2 weights baked", flush=True)
+except Exception as e:  # noqa: BLE001
+    print(f"v2 weight bake skipped: {e!r}"[:300], flush=True)

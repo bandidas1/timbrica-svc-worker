@@ -63,6 +63,10 @@ def main() -> None:
         sys.modules.setdefault("gradio", types.ModuleType("gradio"))
         mod = "app_svc" if "seed" in root else "soulxsinger"
         step("%s (engine package)" % mod, lambda: __import__(mod))
+        if "seed" in root:
+            # model="speech" (/voice-gender) runs a second seed-vc entry point
+            step("app_vc (speech model package)", lambda: __import__("app_vc"))
+            step("inference_v2 (v2 package)", lambda: __import__("inference_v2"))
     else:
         print("  ??   engine dir not found (%r) — engine import NOT verified" % root, flush=True)
         sys.exit(1)
