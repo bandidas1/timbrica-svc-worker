@@ -27,11 +27,29 @@ import urllib.request
 
 __all__ = ["TransferError", "fetch_audio", "write_tmp", "deliver"]
 
-_RETRIES = 3
-_BACKOFF_S = 1.5
-_GET_TIMEOUT_S = 120
-_PUT_TIMEOUT_S = 300
+# ── Retry policy (2026-11-04) ────────────────────────────────────────────────
+# A finished cover exists only on this worker until the PUT lands on Timbrica,
+# and until 2026-11-04 the policy was «3 tries, 1.5 s and 3 s apart, every 4xx
+# is a verdict»: a 30-second blip on the way to the origin — or nginx's 408 for
+# a body that went silent — failed the job after the GPU work was done, and the
+# app refunded it. The same class lost a finished /video-upscaler file on
+# 2026-11-01 (the network from RunPod to the RU origin failed for half an hour)
+# and showed up as nginx 408s on every 50th request to that box on 28.10.
+# The rules, shared with the upscale and stem workers:
+#   · silence is noticed in _STALL_S — nginx drops a silent body at 60 s, so a
+#     longer socket wait only waits on a request that is already dead;
+#   · no answer at all, 408, 425, 429, any 5xx and a body the app saw cut short
+#     (400 …truncated) are retried; every other 4xx is the app's final word;
+#   · retries go on until the app's own deadline (`deadline_at` in the input,
+#     epoch seconds — past it the app has stopped waiting and refunded), and
+#     never longer than _PATIENCE_S when an older app sends no deadline.
+_STALL_S = 60
+_PATIENCE_S = 600
+_GET_TIMEOUT_S = _STALL_S
+_PUT_TIMEOUT_S = _STALL_S
 _UA = "timbrica-svc-worker/1"
+# Indirection for the self-check (svc_delivery_selftest.py): a fake clock.
+_clock, _sleep, _now = time.monotonic, time.sleep, time.time
 
 
 class TransferError(RuntimeError):
@@ -40,21 +58,55 @@ class TransferError(RuntimeError):
     operator responses (network/signature vs model)."""
 
 
-def _retrying(what, fn):
+def _retryable(code, body=""):
+    if code == 0 or code in (408, 425, 429) or code >= 500:
+        return True
+    return code == 400 and "truncated" in (body or "")
+
+
+def _pause(attempt):
+    return (2, 5, 10, 20)[attempt] if attempt < 4 else 30
+
+
+def _deadline_of(inp):
+    try:
+        return float((inp or {}).get("deadline_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _retrying(what, fn, deadline_at=0.0, ok_codes=()):
+    """Run `fn` until it answers, the app's deadline is near, or patience is out.
+    An HTTP code in `ok_codes` counts as success (returned as the status)."""
+    started = _clock()
+    attempt = 0
     last = None
-    for attempt in range(1, _RETRIES + 1):
+    while True:
         try:
             return fn()
         except urllib.error.HTTPError as e:
-            # 4xx is a verdict (expired signature, wrong job): retrying cannot help.
-            if e.code < 500:
+            if e.code in ok_codes:
+                return e.code
+            try:
+                body = e.read(300).decode("utf-8", "replace")
+            except Exception:
+                body = ""
+            if not _retryable(e.code, body):
+                # 403 signature, 404/410 job gone, 413 size, 422 wrong file:
+                # sending the same bytes again cannot change the answer.
                 raise TransferError(f"{what}_http_{e.code}") from e
-            last = e
+            last = f"http_{e.code}"
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            last = e
-        if attempt < _RETRIES:
-            time.sleep(_BACKOFF_S * attempt)
-    raise TransferError(f"{what}_unreachable: {repr(last)[:120]}")
+            last = repr(e)[:120]
+        pause = _pause(attempt)
+        attempt += 1
+        if _clock() - started + pause >= _PATIENCE_S:
+            raise TransferError(f"{what}_unreachable: {last}")
+        # Never start a try that, silent to the end, would outlive the deadline.
+        if deadline_at and _now() + pause + _STALL_S + 5 >= deadline_at:
+            raise TransferError(f"{what}_past_deadline: {last}")
+        print(f"[svc_io] {what} try {attempt} failed ({last}); again in {pause}s", flush=True)
+        _sleep(pause)
 
 
 def fetch_audio(inp, key, max_bytes):
@@ -73,7 +125,7 @@ def fetch_audio(inp, key, max_bytes):
             with urllib.request.urlopen(req, timeout=_GET_TIMEOUT_S) as r:
                 return r.read(max_bytes + 1)
 
-        raw = _retrying(f"{key}_fetch", _get)
+        raw = _retrying(f"{key}_fetch", _get, _deadline_of(inp))
     else:
         b64 = inp.get(f"{key}_b64")
         if not b64 or not isinstance(b64, str):
@@ -122,5 +174,7 @@ def deliver(wav_bytes, inp, extra):
         with urllib.request.urlopen(req, timeout=_PUT_TIMEOUT_S) as r:
             return r.status
 
-    _retrying("result_put", _put)
+    # 409 «result_already_uploaded»: an earlier try landed and only its answer
+    # was lost — the result is on the app's disk, which is delivery.
+    _retrying("result_put", _put, _deadline_of(inp), ok_codes=(409,))
     return dict(extra, uploaded=True, bytes=len(wav_bytes))
