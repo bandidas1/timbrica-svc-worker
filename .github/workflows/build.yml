@@ -6,6 +6,7 @@ on:
     paths:
       - "handler_*.py"
       - "svc_io.py"
+      - "svc_delivery_selftest.py"
       - "gpu_probe.py"
       - "bake_*.py"
       - "Dockerfile.*"
@@ -35,6 +36,11 @@ jobs:
     name: build ${{ matrix.engine }}
     steps:
       - uses: actions/checkout@v4
+
+      # The transfer retries (svc_io) decide whether a finished cover reaches
+      # the app through a bad network — checked before any image is built.
+      - name: Transfer self-check
+        run: python3 svc_delivery_selftest.py
 
       # torch + CUDA + baked checkpoints run to many GB — free the runner disk first.
       - name: Free disk space
