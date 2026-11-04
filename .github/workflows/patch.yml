@@ -1,0 +1,53 @@
+name: patch-layer
+
+# Ship a source fix ONTO the image production already runs, not a rebuild.
+#
+# WHY (measured 2026-11-04). requirements-*.txt pin only a few packages, so a
+# rebuild resolves everything else anew: the SoulX image built that day from
+# the very commit production runs differed in dozens of packages (filelock
+# 3→4, fsspec, aiohttp, anyio, packages added and dropped), and the seed-vc one
+# no longer built at all. A one-file fix shipped as a rebuild therefore swaps
+# the whole runtime under paying jobs.
+#
+# This appends ONE layer — the changed files — to the exact digest production
+# runs (`crane append`: registry-side, the base layers are never downloaded),
+# so the result is the production runtime byte for byte plus those files.
+# Pin the printed digest in the RunPod template; never a tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "The image production runs: ghcr.io/…/timbrica-svc-worker@sha256:…"
+        required: true
+      name:
+        description: "Tag prefix: seedvc | soulx"
+        required: true
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Transfer self-check
+        run: python3 svc_delivery_selftest.py
+
+      - uses: imjasonh/setup-crane@v0.4
+
+      - name: Append the changed files onto the production image
+        run: |
+          set -eu
+          case "${{ inputs.base }}" in *@sha256:*) ;; *) echo "base must be a DIGEST, not a tag"; exit 1;; esac
+          crane auth login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          mkdir -p layer && cp svc_io.py layer/svc_io.py
+          tar -C layer --owner=0 --group=0 -cf layer.tar svc_io.py
+          NEW="ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ inputs.name }}-patch-${{ github.sha }}"
+          crane append -b "${{ inputs.base }}" -f layer.tar -t "$NEW"
+          echo "pin this in RunPod: ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker@$(crane digest "$NEW")"
+          # The file in the image is the file in this commit.
+          crane export "$NEW" - | tar -xO svc_io.py | sha256sum
+          sha256sum svc_io.py
