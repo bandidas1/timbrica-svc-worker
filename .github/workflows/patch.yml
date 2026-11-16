@@ -44,10 +44,19 @@ jobs:
           case "${{ inputs.base }}" in *@sha256:*) ;; *) echo "base must be a DIGEST, not a tag"; exit 1;; esac
           crane auth login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
           mkdir -p layer && cp svc_io.py layer/svc_io.py
-          tar -C layer --owner=0 --group=0 -cf layer.tar svc_io.py
+          FILES="svc_io.py"
+          # seed-vc: the handler (/handler.py) and the melody's octave repair ride along.
+          if [ "${{ inputs.name }}" = "seedvc" ]; then
+            cp handler_seedvc.py layer/handler.py && cp f0_fix.py layer/f0_fix.py
+            FILES="svc_io.py handler.py f0_fix.py"
+          fi
+          tar -C layer --owner=0 --group=0 -cf layer.tar $FILES
           NEW="ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker:${{ inputs.name }}-patch-${{ github.sha }}"
           crane append -b "${{ inputs.base }}" -f layer.tar -t "$NEW"
           echo "pin this in RunPod: ghcr.io/${{ github.repository_owner }}/timbrica-svc-worker@$(crane digest "$NEW")"
-          # The file in the image is the file in this commit.
-          crane export "$NEW" - | tar -xO svc_io.py | sha256sum
-          sha256sum svc_io.py
+          # Every file in the image is the file in this commit.
+          for f in $FILES; do
+            a=$(crane export "$NEW" - | tar -xO "$f" | sha256sum | cut -d' ' -f1)
+            b=$(sha256sum "layer/$f" | cut -d' ' -f1)
+            echo "$f image=$a commit=$b"; [ "$a" = "$b" ] || { echo "MISMATCH $f"; exit 1; }
+          done

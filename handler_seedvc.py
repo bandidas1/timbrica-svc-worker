@@ -53,6 +53,39 @@ os.chdir(SEED_VC_DIR)
 # stays out of the image. Verified against upstream: no module-level gr usage.
 sys.modules.setdefault("gradio", types.ModuleType("gradio"))
 
+# ---- the melody's octave (2026-11-16) -------------------------------------------
+# The singing model sings the F0 curve RMVPE reads, and on voices whose even
+# harmonics outweigh the odd ones RMVPE reads an octave too HIGH (measured on 9 songs:
+# 1.5-12.7 % of voiced frames, male voices worst; the cover then jumps up an octave
+# there - 15.6 % of sung time on our exam, 2.9 % with the repair). f0_fix.py keeps
+# RMVPE and takes YIN's reading only where the harmonic series confirms it.
+# OPT-IN per request (`octave_repair: true`, /voice-cover sends it): on SPEECH the
+# same physics does not hold (40 FLEURS clips: Praat sided with the repair in 13 %
+# of the frames it changed), so /voice-gender keeps RMVPE as is.
+# SVC_F0_FIX=off switches it off for everyone; any failure keeps RMVPE.
+F0_FIX = os.environ.get("SVC_F0_FIX", "yin")
+_F0 = {"on": False, "repaired": 0}
+
+
+def _octave_safe(raw):
+    import torch
+    import f0_fix
+
+    def fn(audio, thred=0.03):
+        f = raw(audio, thred=thred)
+        if not _F0["on"]:
+            return f
+        try:
+            a = audio.detach().float().cpu().numpy() if torch.is_tensor(audio) else np.asarray(audio, dtype=np.float32)
+            g = f0_fix.fix_octaves(a, f, F0_FIX)
+            _F0["repaired"] += int(f0_fix.fix_octaves.last_changed)
+            return g
+        except Exception as e:  # noqa: BLE001
+            print(f"[f0_fix] skipped, RMVPE kept: {repr(e)[:200]}", flush=True)
+            return f
+    return fn
+
+
 # ---- load model once ---------------------------------------------------------
 _READY = False
 _LOAD_ERR = None
@@ -111,6 +144,7 @@ def _load():
     _m.max_context_window = _m.sr // _m.hop_length * 30
     _m.overlap_wave_len = _m.overlap_frame_len * _m.hop_length
 
+    _m.f0_fn = _octave_safe(_m.f0_fn)
     app_svc = _m
     _READY = True
     print(f"[boot] seed-vc ready sr={_m.sr} hop={_m.hop_length}", flush=True)
@@ -312,6 +346,8 @@ def handler(event):
         tgt_path = svc_io.write_tmp(svc_io.fetch_audio(inp, "target", MAX_AUDIO_BYTES), "svc_ref_")
 
         t0 = time.time()
+        _F0["on"] = bool(inp.get("octave_repair")) and F0_FIX != "off" and model == "svc"
+        _F0["repaired"] = 0
         full = None
         # voice_conversion is a generator: it streams mp3 chunks and yields the
         # complete waveform as (sr, np.float32[]) on its final chunk.
@@ -370,6 +406,7 @@ def handler(event):
             "engine": "seedvc",
             "model": model,
             "watermarked": watermarked,
+            "f0_repaired": _F0["repaired"] if _F0["on"] else None,
         })
     except svc_io.TransferError as e:
         # Moving the audio failed, not the model. Keep them apart in the logs.
